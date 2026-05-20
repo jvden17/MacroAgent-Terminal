@@ -1,0 +1,9 @@
+streamlit
+pandas
+polars
+plotly
+fedfred
+pypdf
+google-genai
+python-dotenv
+alpaca-py
