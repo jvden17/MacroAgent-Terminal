@@ -1,3 +1,12 @@
 .env
 __pycache__/
 *.pyc
+metrics.jsonl
+
+# Python virtualenvs — never commit these
+my_env/
+.venv/
+venv/
+
+# Local third-party research (v2 RAG uses per-user uploads, not this folder)
+knowledge_base/

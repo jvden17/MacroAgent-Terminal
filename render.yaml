@@ -1,0 +1,28 @@
+# Render Blueprint for MacroAgent (educational / paper-only).
+# One-click deploy: push this repo to GitHub, then in Render pick
+# "New +" -> "Blueprint" and point it at the repo. Docs: render.com/docs/blueprint-spec
+#
+# NOTE: healthCheckPath is intentionally omitted -- Render then treats the service
+# as healthy once it binds the port, instead of GETting "/" on a schedule (which
+# would log a bogus session_start metric on every probe).
+services:
+  - type: web
+    name: macroagent
+    runtime: python
+    plan: free            # free instances sleep after ~15 min idle; upgrade for always-on
+    numInstances: 1       # in-memory per-session state must NOT be spread across instances
+    buildCommand: pip install -r requirements.txt
+    startCommand: python macroagent_app.py
+    envVars:
+      # --- Secrets: set the actual values in the Render dashboard (never in git) ---
+      - key: FRED_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: ALPACA_API_KEY
+        sync: false
+      - key: ALPACA_SECRET_KEY
+        sync: false
+      # NiceGUI session-signing secret; Render generates a random value for you
+      - key: NICEGUI_STORAGE_SECRET
+        generateValue: true

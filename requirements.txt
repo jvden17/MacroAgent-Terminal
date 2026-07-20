@@ -1,4 +1,5 @@
 streamlit
+nicegui
 pandas
 polars
 plotly
@@ -7,3 +8,4 @@ pypdf
 google-genai
 python-dotenv
 alpaca-py
+yfinance
