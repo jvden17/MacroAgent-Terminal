@@ -35,7 +35,7 @@ import uuid
 import pandas as pd
 import yfinance as yf
 from dotenv import load_dotenv
-from nicegui import run, ui
+from nicegui import app, run, ui
 
 load_dotenv()  # pull FRED_API_KEY / GOOGLE_API_KEY from .env for the Strategy engine
 
@@ -1195,6 +1195,159 @@ def execution_section(state: dict):
 
 
 # ----------------------------------------------------------------------
+# AUTH  (Supabase magic-link, OPTIONAL login -- the app still works anonymously)
+# ----------------------------------------------------------------------
+def auth_enabled() -> bool:
+    """True only when Supabase is configured; otherwise login UI stays hidden and
+    the app runs anonymous-only."""
+    return bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_ANON_KEY"))
+
+
+def _supabase():
+    """A fresh Supabase client (or None). Fresh per call so one user's auth state
+    never leaks into another's on this shared server."""
+    if not auth_enabled():
+        return None
+    try:
+        from supabase import ClientOptions, create_client
+        # implicit flow -> magic-link redirect carries tokens in the URL fragment,
+        # which our /auth/callback reads client-side. PKCE (the client default)
+        # would need a per-user code_verifier we can't keep on this stateless server.
+        return create_client(
+            os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_ANON_KEY"),
+            options=ClientOptions(flow_type="implicit"))
+    except Exception as exc:            # noqa: BLE001
+        print(f"[auth] supabase init failed: {exc}")
+        return None
+
+
+def current_user():
+    """The logged-in user dict for this browser ({id, email}), or None."""
+    try:
+        return app.storage.user.get("auth")
+    except Exception:                   # noqa: BLE001 -- storage needs a request ctx
+        return None
+
+
+def _send_magic_link(email: str, redirect_to: str) -> dict:
+    """BLOCKING: ask Supabase to email a one-time login link."""
+    client = _supabase()
+    if client is None:
+        return {"error": "Auth is not configured on this server."}
+    try:
+        client.auth.sign_in_with_otp({
+            "email": email,
+            "options": {"email_redirect_to": redirect_to},
+        })
+        return {"ok": True}
+    except Exception as exc:            # noqa: BLE001
+        return {"error": str(exc)}
+
+
+def _establish_session(access_token: str, refresh_token: str) -> dict:
+    """BLOCKING: validate the tokens from the magic-link redirect -> user info."""
+    client = _supabase()
+    if client is None:
+        return {"error": "Auth is not configured on this server."}
+    try:
+        res = client.auth.set_session(access_token, refresh_token)
+        return {"id": res.user.id, "email": res.user.email}
+    except Exception as exc:            # noqa: BLE001
+        return {"error": str(exc)}
+
+
+def auth_header(state: dict):
+    """Header control: shows the signed-in email + LOG OUT, or a LOG IN button.
+    Rendered only when auth is configured (optional-login model)."""
+    user = current_user()
+    if user:
+        ui.label(user.get("email", "")).style(
+            f"color:{NEON};font-family:{MONO};font-size:12px")
+        ui.button("LOG OUT", on_click=lambda: _logout(state)).props("flat dense")
+        return
+
+    async def _open_login():
+        with ui.dialog() as dlg, ui.card().style(
+                f"background:{PANEL};min-width:340px"):
+            ui.label("SIGN IN").classes("ma-title text-lg")
+            ui.label("Enter your email — we'll send a one-time magic link. "
+                     "No password needed.").style(
+                f"color:{MUTED};font-family:{MONO};font-size:12px")
+            email_in = ui.input("Email").props("dark autofocus").classes("w-full") \
+                .style(f"color:{NEON}")
+            msg = ui.label("").style(f"color:{MUTED};font-family:{MONO};font-size:12px")
+            send_btn = ui.button("SEND MAGIC LINK").props("outline") \
+                .style(f"color:{NEON};border-color:{NEON};font-family:{MONO}")
+
+            async def _send():
+                addr = (email_in.value or "").strip()
+                if "@" not in addr or "." not in addr:
+                    msg.text = "Enter a valid email address."
+                    return
+                send_btn.disable()
+                # origin resolves to localhost or the deployed host automatically
+                origin = await ui.run_javascript("window.location.origin")
+                res = await run.io_bound(_send_magic_link, addr, f"{origin}/auth/callback")
+                send_btn.enable()
+                if "error" in res:
+                    msg.text = res["error"]
+                    return
+                msg.text = "✓ Check your email for the login link."
+                log_event("login_link_sent", session=state.get("session_id"))
+
+            send_btn.on("click", _send)
+            email_in.on("keydown.enter", _send)
+        dlg.open()
+
+    ui.button("LOG IN", on_click=lambda: _open_login()) \
+        .props("outline dense").style(f"color:{NEON};border-color:{NEON}")
+
+
+def _logout(state: dict):
+    try:
+        app.storage.user.pop("auth", None)
+    except Exception:                   # noqa: BLE001
+        pass
+    log_event("logout", session=state.get("session_id"))
+    ui.navigate.to("/")
+
+
+@ui.page("/auth/callback")
+async def auth_callback():
+    """Landing page for the magic link. Supabase redirects here with the session
+    tokens in the URL fragment (#access_token=...); we read them client-side,
+    validate server-side, persist the user, then bounce to the app."""
+    ui.add_head_html(GLOBAL_CSS)
+    ui.colors(primary=NEON, secondary=NEON, accent=NEON, positive=NEON)
+    with ui.column().classes("w-full items-center").style("margin-top:18vh;gap:12px"):
+        ui.label("MacroAgent").classes("ma-title text-2xl")
+        note = ui.label("Signing you in…").style(
+            f"color:{MUTED};font-family:{MONO}")
+        ui.spinner(size="lg", color="primary")
+
+    await ui.context.client.connected()
+    tokens = await ui.run_javascript(
+        "(() => { const p = new URLSearchParams(window.location.hash.substring(1));"
+        " return {access: p.get('access_token'), refresh: p.get('refresh_token'),"
+        " err: p.get('error_description')}; })()")
+
+    if not tokens or not tokens.get("access"):
+        note.text = tokens.get("err") if tokens else "Login link invalid or expired."
+        ui.button("BACK TO APP", on_click=lambda: ui.navigate.to("/")).props("outline")
+        return
+
+    info = await run.io_bound(_establish_session, tokens["access"], tokens["refresh"])
+    if "error" in info:
+        note.text = f"Login failed: {info['error']}"
+        ui.button("BACK TO APP", on_click=lambda: ui.navigate.to("/")).props("outline")
+        return
+
+    app.storage.user["auth"] = info
+    log_event("login_success", {"user": info["id"]})
+    ui.navigate.to("/")
+
+
+# ----------------------------------------------------------------------
 # APP SHELL  (@ui.page = each browser gets its own state; multi-tenant-ready)
 # ----------------------------------------------------------------------
 @ui.page("/")
@@ -1202,12 +1355,15 @@ def main_page():
     ui.add_head_html(GLOBAL_CSS)
     ui.colors(primary=NEON, secondary=NEON, accent=NEON, positive=NEON)
     # shared across tabs this session (per-client isolation, multi-tenant-ready)
+    user = current_user()
     state = {"profile": None, "research": [], "research_text": {},
              "memo": None, "chat_history": [], "positions": {},
-             "session_id": uuid.uuid4().hex[:12]}   # correlate this client's events
-    log_event("session_start", session=state["session_id"])
+             "session_id": uuid.uuid4().hex[:12],   # correlate this client's events
+             "user": user}
+    log_event("session_start", {"user": (user or {}).get("id")},
+              session=state["session_id"])
 
-    with ui.header().classes("items-center"):
+    with ui.header().classes("items-center gap-4"):
         ui.label("MacroAgent").classes("ma-title text-xl")
         ui.space()
         with ui.tabs() as tabs:
@@ -1215,6 +1371,9 @@ def main_page():
             t_strategy = ui.tab("STRATEGY")
             t_charts = ui.tab("CHARTS")
             t_exec = ui.tab("EXECUTION")
+        if auth_enabled():
+            with ui.row().classes("items-center gap-2"):
+                auth_header(state)
 
     with ui.tab_panels(tabs, value=t_profile).classes("w-full"):
         with ui.tab_panel(t_profile):
@@ -1243,5 +1402,7 @@ if __name__ in {"__main__", "__mp_main__"}:
         port=int(os.getenv("PORT", "8090")),
         reload=False,
         show=False,                                    # never auto-open a browser server-side
-        storage_secret=os.getenv("NICEGUI_STORAGE_SECRET"),
+        # signs per-user session storage (login state). Prod sets this via env;
+        # the fallback keeps local dev working but must NOT be relied on in prod.
+        storage_secret=os.getenv("NICEGUI_STORAGE_SECRET") or "macroagent-dev-only-secret",
     )

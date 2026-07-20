@@ -79,3 +79,32 @@ Double-check `.env` is **not** in the commit (it's gitignored) before pushing.
 
 5. **Rotate keys if they ever touched git.** Set every secret in the dashboard, not
    in a committed file.
+
+---
+
+## Enabling login (Supabase magic link)
+
+Login is **optional** — the app runs anonymous-only until these are set, then a
+**LOG IN** button appears in the header.
+
+1. Create a project at [supabase.com](https://supabase.com).
+2. **Settings → API**: copy the **Project URL** and the **anon / public** key.
+3. Set them as env vars (local `.env` *and* the Render dashboard):
+   `SUPABASE_URL`, `SUPABASE_ANON_KEY`. (The anon key is public by design.)
+4. **Auth → URL Configuration** — this is required, magic links only redirect to
+   allow-listed URLs:
+   - **Site URL**: your primary app URL (the `onrender.com` one).
+   - **Redirect URLs**: add BOTH
+     `http://localhost:8090/auth/callback` (dev) and
+     `https://<your-app>.onrender.com/auth/callback` (prod).
+5. **Email provider** is on by default. Supabase's built-in email sender is
+   **rate-limited (~2–4/hour, for testing only)** — if links stop arriving, that's
+   why. For real use, configure custom SMTP under **Auth → Emails**.
+
+The app uses the **implicit** auth flow on purpose (tokens arrive in the URL
+fragment at `/auth/callback`), which suits this stateless server; don't switch the
+client to PKCE without also handling the code-exchange.
+
+> Login currently establishes **identity** (email shown, LOG OUT, metrics tied to
+> the user id). Persisting each user's **profile/trades across sessions** is the
+> next step — it needs a Postgres `profiles` table + row-level security.
